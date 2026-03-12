@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import os
 import uuid
+import subprocess
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile
@@ -24,8 +25,8 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram Downloader</b>\n\n"
-        "Send me an Instagram link."
+        "👋 <b>Instagram Downloader Bot</b>\n\n"
+        "Send an Instagram link and I will download the media."
     )
 
 
@@ -50,16 +51,32 @@ async def download_file(url):
     return filename
 
 
+def create_thumbnail(video_path):
+    thumb_path = f"{video_path}.jpg"
+
+    command = [
+        "ffmpeg",
+        "-i", video_path,
+        "-ss", "00:00:01",
+        "-vframes", "1",
+        thumb_path
+    ]
+
+    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return thumb_path
+
+
 @dp.message()
 async def downloader(message: Message):
 
     url = message.text.strip()
 
     if "instagram.com" not in url:
-        await message.reply("❌ Send a valid Instagram link.")
+        await message.reply("❌ Please send a valid Instagram link.")
         return
 
-    status = await message.reply("⏳ Downloading media...")
+    status = await message.reply("⏳ Fetching media...")
 
     try:
         data = await fetch_instagram(url)
@@ -69,6 +86,10 @@ async def downloader(message: Message):
             return
 
         media_list = data.get("data", [])
+
+        if not media_list:
+            await status.edit_text("❌ No media found.")
+            return
 
         await status.edit_text("📥 Downloading files...")
 
@@ -85,12 +106,23 @@ async def downloader(message: Message):
             file = FSInputFile(file_path)
 
             if media_type == "video":
-                await message.answer_video(file)
+
+                thumb = create_thumbnail(file_path)
+
+                await message.answer_video(
+                    video=file,
+                    thumbnail=FSInputFile(thumb),
+                    supports_streaming=True
+                )
+
+                os.remove(thumb)
 
             elif media_type == "image":
+
                 await message.answer_photo(file)
 
             else:
+
                 await message.answer_document(file)
 
             os.remove(file_path)
