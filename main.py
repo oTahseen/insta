@@ -15,7 +15,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
 TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
-YOUTUBE_API = "https://api.delirius.store/download/ytmp4?url="  # will append url and format
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -27,86 +26,39 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram / TikTok / YouTube Downloader</b>\n\n"
-        "Send an Instagram, TikTok or YouTube link and I will download the media."
+        "👋 <b>Instagram / TikTok Downloader</b>\n\n"
+        "Send an Instagram or TikTok link and I will download the media."
     )
 
 async def fetch_data(url: str):
-    """
-    Keep original TikTok / Instagram behavior. For YouTube call the ytmp4 endpoint.
-    """
-    u = (url or "").lower()
-    is_tiktok = any(x in u for x in ("tiktok", "tiktokcdn", "vm.tiktok"))
-    is_youtube = any(x in u for x in ("youtube.com", "youtu.be"))
-
+    if "tiktok" in url or "tiktokcdn" in url or "vm.tiktok" in url:
+        api = f"{TIKTOK_API}{url}"
+    else:
+        api = f"{INSTAGRAM_API}{url}"
     async with aiohttp.ClientSession() as session:
-        if is_youtube:
-            # call ytmp4 with format=720 (the API expects query params)
-            api = f"{YOUTUBE_API}{url}&format=720"
-            async with session.get(api) as resp:
-                if resp.status != 200:
-                    return {"status": False}
-                return await resp.json()
-        if is_tiktok:
-            api = f"{TIKTOK_API}{url}"
-        else:
-            api = f"{INSTAGRAM_API}{url}"
         async with session.get(api) as resp:
             if resp.status != 200:
                 return {"status": False}
             return await resp.json()
 
-async def download_file(url: str):
-    """
-    Download URL to a temp file and return path.
-    Keep behavior close to original but add:
-      - longer timeout
-      - cleanup of partial files on error
-      - richer exceptions (include URL and underlying error)
-    """
+async def download_file(url):
     filename = f"/tmp/{uuid.uuid4().hex}"
-    # generous total timeout to avoid cutting off slow CDNs
-    timeout = aiohttp.ClientTimeout(total=180)
-
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Try a HEAD first to get a quick status check (not all servers support HEAD)
-            try:
-                head = await session.head(url, allow_redirects=True)
-                head_status = head.status
-                # only use head info for diagnostics, not to decide to abort
-            except Exception:
-                head_status = None
-
-            async with session.get(url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Download failed (status={resp.status}) for {url}")
-                with open(filename, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 256):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-    except Exception as exc:
-        # cleanup partial file
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-        except Exception:
-            pass
-        # surface the underlying exception and the HEAD status if available
-        raise RuntimeError(f"download error for {url}: {exc}") from exc
-
-    # verify file non-empty
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise ValueError(f"Download failed (status={{resp.status}}) for {{url}}")
+            with open(filename, "wb") as f:
+                async for chunk in resp.content.iter_chunked(1024 * 256):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
     try:
         size = os.path.getsize(filename)
     except OSError:
         size = 0
     if size == 0:
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-        except Exception:
-            pass
+        if os.path.exists(filename):
+            os.remove(filename)
         raise ValueError("Downloaded file is empty")
     return filename
 
@@ -126,12 +78,6 @@ def create_thumbnail(video_path):
 def parse_media(api_json, original_url: str):
     out = []
     data = api_json.get("data")
-    # YouTube ytmp4 returns a dict with download field inside data
-    if isinstance(data, dict) and data.get("download"):
-        out.append({"url": data.get("download"), "type": "video"})
-        return out
-
-    # fallback to original parsing for Instagram/TikTok
     if isinstance(data, list):
         for m in data:
             murl = m.get("url")
@@ -170,11 +116,10 @@ def parse_media(api_json, original_url: str):
 async def downloader(message: Message):
     url = (message.text or "").strip()
     if not url:
-        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
+        await message.reply("❌ Please send a valid Instagram or TikTok link.")
         return
-    u = url.lower()
-    if ("instagram.com" not in u) and ("tiktok" not in u) and ("youtube.com" not in u) and ("youtu.be" not in u):
-        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
+    if ("instagram.com" not in url) and ("tiktok" not in url):
+        await message.reply("❌ Please send a valid Instagram or TikTok link.")
         return
     status = await message.reply("⏳ Fetching media...")
     try:
@@ -193,14 +138,11 @@ async def downloader(message: Message):
             mtype = media.get("type", "document")
             if not murl:
                 continue
-            # small diagnostic: tell which URL we are about to download (use status edit to avoid spam)
-            await status.edit_text(f"📥 Downloading: {murl}")
             try:
                 file_path = await download_file(murl)
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
-                # include the URL + underlying error to help debugging
-                await message.reply(f"⚠️ Skipped a file (download failed) for {murl}: {e}")
+                await message.reply(f"⚠️ Skipped a file (download failed): {{e}}")
         if not downloaded_files:
             await status.edit_text("❌ Nothing downloaded.")
             return
@@ -225,15 +167,12 @@ async def downloader(message: Message):
                 else:
                     await message.answer_document(file)
             except Exception as e:
-                await message.reply(f"❌ Telegram send failed: {e}")
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                pass
+                await message.reply(f"❌ Telegram send failed: {{e}}")
+            if os.path.exists(file_path):
+                os.remove(file_path)
         await status.delete()
     except Exception as e:
-        await message.reply(f"❌ Error: {e}")
+        await message.reply(f"❌ Error: {{e}}")
 
 async def main():
     print("🚀 Bot started")
