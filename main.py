@@ -50,17 +50,10 @@ async def fetch_data(url: str):
                 return {"status": False}
             return await resp.json()
 
-async def download_file(url, referer=None):
+async def download_file(url):
     filename = f"/tmp/{uuid.uuid4().hex}"
-    # Use a common browser User-Agent to avoid servers blocking non-browser requests.
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36"
-    }
-    if referer:
-        headers["Referer"] = referer
-    timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=timeout) as resp:
+        async with session.get(url) as resp:
             if resp.status != 200:
                 raise ValueError(f"Download failed (status={resp.status}) for {url}")
             with open(filename, "wb") as f:
@@ -159,12 +152,8 @@ async def downloader(message: Message):
             mtype = media.get("type", "document")
             if not murl:
                 continue
-            # If the media URL points to TikTok/CDN, add a TikTok referer to avoid blocking.
-            referer = None
-            if ("tiktok" in murl) or ("tiktokcdn" in murl) or ("vm.tiktok" in murl):
-                referer = "https://www.tiktok.com/"
             try:
-                file_path = await download_file(murl, referer=referer)
+                file_path = await download_file(murl)
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
                 await message.reply(f"⚠️ Skipped a file (download failed): {e}")
