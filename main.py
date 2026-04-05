@@ -3,8 +3,6 @@ import aiohttp
 import os
 import uuid
 import subprocess
-from urllib.parse import quote_plus
-from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile
@@ -12,15 +10,10 @@ from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    print("BOT_TOKEN is missing. Set BOT_TOKEN in your .env file.")
-    raise SystemExit(1)
+BOT_TOKEN = "8648830104:AAEc8EFi1lqoOCMLh5N4UxxbHoVtOsSEL84"
 
 INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
 TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
-YT_API = "https://api.delirius.store/download/ytmp4?url="
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -29,54 +22,68 @@ bot = Bot(
 
 dp = Dispatcher()
 
+
+# START COMMAND
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram / TikTok / YouTube Downloader</b>\n\n"
-        "Send an Instagram, TikTok or YouTube link and I will download the media."
+        "👋 <b>Instagram / TikTok Downloader</b>\n\n"
+        "Send an Instagram or TikTok link and I will download the media."
     )
 
+
+# FETCH DATA (chooses endpoint by URL)
 async def fetch_data(url: str):
-    norm_url = url.strip()
-    if ("tiktok" in norm_url) or ("tiktokcdn" in norm_url) or ("vm.tiktok" in norm_url):
-        api = f"{TIKTOK_API}{quote_plus(norm_url)}"
-    elif ("youtube.com" in norm_url) or ("youtu.be" in norm_url):
-        api = f"{YT_API}{quote_plus(norm_url)}"
+
+    if "tiktok" in url or "tiktokcdn" in url or "vm.tiktok" in url:
+        api = f"{TIKTOK_API}{url}"
     else:
-        api = f"{INSTAGRAM_API}{quote_plus(norm_url)}"
+        api = f"{INSTAGRAM_API}{url}"
+
     async with aiohttp.ClientSession() as session:
         async with session.get(api) as resp:
             if resp.status != 200:
                 return {"status": False}
             return await resp.json()
 
+
+# STREAM DOWNLOAD FILE (ensures non-empty file)
 async def download_file(url):
-    # Validate URL before attempting download
-    if not isinstance(url, str) or not (url.startswith("http://") or url.startswith("https://")):
-        raise ValueError(f"Invalid URL: {url}")
 
     filename = f"/tmp/{uuid.uuid4().hex}"
+
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise ValueError(f"Download failed (status={resp.status}) for {url}")
+
             with open(filename, "wb") as f:
+
                 async for chunk in resp.content.iter_chunked(1024 * 256):
                     if not chunk:
                         continue
                     f.write(chunk)
+
+    # verify non-empty
     try:
         size = os.path.getsize(filename)
     except OSError:
         size = 0
+
     if size == 0:
+        # remove empty file if created
         if os.path.exists(filename):
             os.remove(filename)
         raise ValueError("Downloaded file is empty")
+
     return filename
 
+
+# CREATE VIDEO THUMBNAIL
 def create_thumbnail(video_path):
+
     thumb = f"{video_path}.jpg"
+
     command = [
         "ffmpeg",
         "-ss", "00:00:01",
@@ -85,19 +92,22 @@ def create_thumbnail(video_path):
         "-q:v", "2",
         thumb
     ]
+
     subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     return thumb
 
+
+# PARSE API RESPONSE INTO A LIST OF MEDIA DICTS {url, type}
 def parse_media(api_json, original_url: str):
     """
-    Parse the API JSON and return a list of dicts: {"url": <url>, "type": <video|image|audio|document>}
-    Note: For TikTok the "download" field can be a numeric string (count). Only treat it as a URL
-    when it looks like one (starts with http).
+    Returns a list of dicts: {'url': <url>, 'type': 'video'|'image'|'audio'|'document'}
+    Handles both Instagram's and TikTok's response shapes.
     """
     out = []
-    data = api_json.get("data")
 
-    # If data is a list of media objects
+    # Instagram-like response: data is a list of media objects
+    data = api_json.get("data")
     if isinstance(data, list):
         for m in data:
             murl = m.get("url")
@@ -106,117 +116,141 @@ def parse_media(api_json, original_url: str):
                 out.append({"url": murl, "type": mtype})
         return out
 
-    # If data is a dict, first check if there's a download URL that actually looks like a URL
-    if isinstance(data, dict):
-        dl = data.get("download")
-        if isinstance(dl, str) and dl.startswith("http"):
-            out.append({"url": dl, "type": "video"})
-            return out
-
-    # Process meta.media entries (covers TikTok and other structured responses)
+    # TikTok-like response: data is a dict with meta.media list
     if isinstance(data, dict):
         meta = data.get("meta", {})
         media = meta.get("media", [])
         for m in media:
-            if not isinstance(m, dict):
-                continue
             mtype = m.get("type")
             if mtype == "video":
-                # Prefer original (org), then hd, then watermark (wm)
+                # prefer original (org) then hd then watermark (wm)
                 url = m.get("org") or m.get("hd") or m.get("wm")
-                if url and isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
+                if url:
                     out.append({"url": url, "type": "video"})
             elif mtype == "image":
                 images = m.get("images", [])
                 for img in images:
-                    if img and isinstance(img, str) and (img.startswith("http://") or img.startswith("https://")):
+                    if img:
                         out.append({"url": img, "type": "image"})
+                # tiktok may include an audio URL for image posts
                 audio = m.get("audio")
-                if audio and isinstance(audio, str) and (audio.startswith("http://") or audio.startswith("https://")):
+                if audio:
                     out.append({"url": audio, "type": "audio"})
             else:
-                # Fallback: try common keys
+                # fallback: try any url-like keys
                 for k in ("url", "org", "hd", "wm"):
-                    v = m.get(k)
-                    if v and isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
-                        out.append({"url": v, "type": mtype or "document"})
+                    if m.get(k):
+                        out.append({"url": m.get(k), "type": mtype or "document"})
                         break
         return out
 
-    # If top-level api_json has a url field
+    # last ditch: if data contains url directly
     if isinstance(api_json, dict) and api_json.get("url"):
-        top_url = api_json.get("url")
-        if isinstance(top_url, str) and (top_url.startswith("http://") or top_url.startswith("https://")):
-            out.append({"url": top_url, "type": "document"})
+        out.append({"url": api_json.get("url"), "type": "document"})
+
     return out
 
+
+# MAIN DOWNLOADER
 @dp.message()
 async def downloader(message: Message):
+
     url = (message.text or "").strip()
     if not url:
-        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
+        await message.reply("❌ Please send a valid Instagram or TikTok link.")
         return
-    if ("instagram.com" not in url) and ("tiktok" not in url) and ("youtube" not in url) and ("youtu.be" not in url):
-        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
+
+    if ("instagram.com" not in url) and ("tiktok" not in url):
+        await message.reply("❌ Please send a valid Instagram or TikTok link.")
         return
+
     status = await message.reply("⏳ Fetching media...")
+
     try:
+
         data = await fetch_data(url)
+
         if not data.get("status"):
             await status.edit_text("❌ Failed to fetch media.")
             return
+
         media_list = parse_media(data, url)
+
         if not media_list:
             await status.edit_text("❌ No media found.")
             return
+
         await status.edit_text("📥 Downloading...")
+
         downloaded_files = []
+
         for media in media_list:
             murl = media.get("url")
             mtype = media.get("type", "document")
             if not murl:
                 continue
             try:
-                # helpful debug: show which URL we're attempting to download
-                print(f"Downloading {mtype} from {murl}")
                 file_path = await download_file(murl)
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
+                # skip empty or failed downloads, but log to user
                 await message.reply(f"⚠️ Skipped a file (download failed): {e}")
+
         if not downloaded_files:
             await status.edit_text("❌ Nothing downloaded.")
             return
+
         await status.edit_text("⬆ Uploading...")
+
         for file_path, media_type in downloaded_files:
+
             file = FSInputFile(file_path)
+
             try:
                 if media_type == "video":
                     thumb = create_thumbnail(file_path)
                     thumb_file = FSInputFile(thumb) if os.path.exists(thumb) else None
+
                     await message.answer_video(
                         video=file,
                         thumbnail=thumb_file,
                         supports_streaming=True
                     )
+
                     if thumb_file and os.path.exists(thumb):
                         os.remove(thumb)
+
                 elif media_type == "image":
                     await message.answer_photo(file)
+
                 elif media_type == "audio":
+                    # send audio file
                     await message.answer_audio(file)
+
                 else:
                     await message.answer_document(file)
+
             except Exception as e:
+                # log send errors but continue
                 await message.reply(f"❌ Telegram send failed: {e}")
+
+            # cleanup
             if os.path.exists(file_path):
                 os.remove(file_path)
+
         await status.delete()
+
     except Exception as e:
         await message.reply(f"❌ Error: {e}")
 
+
+# RUN BOT
 async def main():
+
     print("🚀 Bot started")
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
