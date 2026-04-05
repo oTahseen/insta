@@ -3,6 +3,7 @@ import aiohttp
 import os
 import uuid
 import subprocess
+from urllib.parse import quote_plus
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile
@@ -14,6 +15,7 @@ BOT_TOKEN = "8648830104:AAEc8EFi1lqoOCMLh5N4UxxbHoVtOsSEL84"
 
 INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
 TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
+YT_API = "https://api.delirius.store/download/ytmp4?url="
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -27,18 +29,23 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram / TikTok Downloader</b>\n\n"
-        "Send an Instagram or TikTok link and I will download the media."
+        "👋 <b>Instagram / TikTok / YouTube Downloader</b>\n\n"
+        "Send an Instagram, TikTok or YouTube link and I will download the media."
     )
 
 
 # FETCH DATA (chooses endpoint by URL)
 async def fetch_data(url: str):
 
-    if "tiktok" in url or "tiktokcdn" in url or "vm.tiktok" in url:
-        api = f"{TIKTOK_API}{url}"
+    norm_url = url.strip()
+
+    if ("tiktok" in norm_url) or ("tiktokcdn" in norm_url) or ("vm.tiktok" in norm_url):
+        api = f"{TIKTOK_API}{quote_plus(norm_url)}"
+    elif ("youtube.com" in norm_url) or ("youtu.be" in norm_url):
+        # urlencode the youtube link so & and other chars are safely passed as a param
+        api = f"{YT_API}{quote_plus(norm_url)}"
     else:
-        api = f"{INSTAGRAM_API}{url}"
+        api = f"{INSTAGRAM_API}{quote_plus(norm_url)}"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(api) as resp:
@@ -55,7 +62,7 @@ async def download_file(url):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                raise ValueError(f"Download failed (status={resp.status}) for {url}")
+                raise ValueError(f"Download failed (status={{resp.status}}) for {{url}}")
 
             with open(filename, "wb") as f:
 
@@ -80,6 +87,7 @@ async def download_file(url):
 
 
 # CREATE VIDEO THUMBNAIL
+
 def create_thumbnail(video_path):
 
     thumb = f"{video_path}.jpg"
@@ -102,7 +110,7 @@ def create_thumbnail(video_path):
 def parse_media(api_json, original_url: str):
     """
     Returns a list of dicts: {'url': <url>, 'type': 'video'|'image'|'audio'|'document'}
-    Handles both Instagram's and TikTok's response shapes.
+    Handles Instagram, TikTok and YouTube response shapes.
     """
     out = []
 
@@ -114,6 +122,13 @@ def parse_media(api_json, original_url: str):
             mtype = m.get("type", "document")
             if murl:
                 out.append({"url": murl, "type": mtype})
+        return out
+
+    # YouTube ytmp4 response: data is a dict with download key
+    if isinstance(data, dict) and data.get("download"):
+        dl = data.get("download")
+        if dl:
+            out.append({"url": dl, "type": "video"})
         return out
 
     # TikTok-like response: data is a dict with meta.media list
@@ -157,11 +172,11 @@ async def downloader(message: Message):
 
     url = (message.text or "").strip()
     if not url:
-        await message.reply("❌ Please send a valid Instagram or TikTok link.")
+        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
         return
 
-    if ("instagram.com" not in url) and ("tiktok" not in url):
-        await message.reply("❌ Please send a valid Instagram or TikTok link.")
+    if ("instagram.com" not in url) and ("tiktok" not in url) and ("youtube" not in url) and ("youtu.be" not in url):
+        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
         return
 
     status = await message.reply("⏳ Fetching media...")
@@ -194,7 +209,7 @@ async def downloader(message: Message):
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
                 # skip empty or failed downloads, but log to user
-                await message.reply(f"⚠️ Skipped a file (download failed): {e}")
+                await message.reply(f"⚠️ Skipped a file (download failed): {{e}}")
 
         if not downloaded_files:
             await status.edit_text("❌ Nothing downloaded.")
@@ -232,7 +247,7 @@ async def downloader(message: Message):
 
             except Exception as e:
                 # log send errors but continue
-                await message.reply(f"❌ Telegram send failed: {e}")
+                await message.reply(f"❌ Telegram send failed: {{e}}")
 
             # cleanup
             if os.path.exists(file_path):
@@ -241,7 +256,7 @@ async def downloader(message: Message):
         await status.delete()
 
     except Exception as e:
-        await message.reply(f"❌ Error: {e}")
+        await message.reply(f"❌ Error: {{e}}")
 
 
 # RUN BOT
