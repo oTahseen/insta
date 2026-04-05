@@ -12,7 +12,8 @@ from aiogram.client.default import DefaultBotProperties
 
 BOT_TOKEN = "8648830104:AAEc8EFi1lqoOCMLh5N4UxxbHoVtOsSEL84"
 
-API_URL = "https://api.delirius.store/download/instagram?url="
+INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
+TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -26,15 +27,18 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram Downloader</b>\n\n"
-        "Send an Instagram link and I will download the media."
+        "👋 <b>Instagram / TikTok Downloader</b>\n\n"
+        "Send an Instagram or TikTok link and I will download the media."
     )
 
 
-# FETCH INSTAGRAM DATA
-async def fetch_instagram(url: str):
+# FETCH FROM DELIRIUS API (auto-select endpoint)
+async def fetch_api(url: str):
 
-    api = f"{API_URL}{url}"
+    if "tiktok.com" in url or "vm.tiktok.com" in url:
+        api = f"{TIKTOK_API}{url}"
+    else:
+        api = f"{INSTAGRAM_API}{url}"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(api) as resp:
@@ -80,23 +84,60 @@ def create_thumbnail(video_path):
 @dp.message()
 async def downloader(message: Message):
 
-    url = message.text.strip()
+    url = (message.text or "").strip()
 
-    if "instagram.com" not in url:
-        await message.reply("❌ Please send a valid Instagram link.")
+    if not url or ("instagram.com" not in url and "tiktok.com" not in url and "vm.tiktok.com" not in url):
+        await message.reply("❌ Please send a valid Instagram or TikTok link.")
         return
 
     status = await message.reply("⏳ Fetching media...")
 
     try:
 
-        data = await fetch_instagram(url)
+        data = await fetch_api(url)
 
-        if not data.get("status"):
+        if not data or not data.get("status"):
             await status.edit_text("❌ Failed to fetch media.")
             return
 
-        media_list = data.get("data", [])
+        # Normalize different API shapes into a list of media dicts with keys: url, type
+        media_list = []
+
+        # TikTok response: data is a dict with meta.media list
+        if "tiktok.com" in url or "vm.tiktok.com" in url:
+
+            d = data.get("data", {}) or {}
+            meta_media = d.get("meta", {}).get("media", [])
+
+            for m in meta_media:
+                mtype = m.get("type")
+
+                if mtype == "video":
+                    # prefer original (org) then hd then wm
+                    vurl = m.get("org") or m.get("hd") or m.get("wm")
+                    if vurl:
+                        media_list.append({"url": vurl, "type": "video"})
+
+                elif mtype == "image":
+                    images = m.get("images", []) or []
+                    for img in images:
+                        media_list.append({"url": img, "type": "image"})
+
+                    # sometimes there's a separate audio file we can also download
+                    audio = m.get("audio")
+                    if audio:
+                        media_list.append({"url": audio, "type": "audio"})
+
+                else:
+                    # fallback: try to find any direct url fields
+                    for key in ("org", "hd", "wm", "url"):
+                        if m.get(key):
+                            media_list.append({"url": m.get(key), "type": mtype or "file"})
+                            break
+
+        else:
+            # Instagram response: data is already a list of media dicts {url, type}
+            media_list = data.get("data", []) or []
 
         if not media_list:
             await status.edit_text("❌ No media found.")
@@ -108,8 +149,19 @@ async def downloader(message: Message):
 
         for media in media_list:
 
-            file_path = await download_file(media["url"])
-            downloaded_files.append((file_path, media["type"]))
+            # some items might be simple strings (older API shapes), normalize
+            if isinstance(media, str):
+                file_path = await download_file(media)
+                downloaded_files.append((file_path, "file"))
+            else:
+                url_to_dl = media.get("url") or media.get("org") or media.get("hd") or media.get("wm")
+                mtype = media.get("type") or "file"
+
+                if not url_to_dl:
+                    continue
+
+                file_path = await download_file(url_to_dl)
+                downloaded_files.append((file_path, mtype))
 
         await status.edit_text("⬆ Uploading...")
 
@@ -121,18 +173,33 @@ async def downloader(message: Message):
 
                 thumb = create_thumbnail(file_path)
 
-                await message.answer_video(
-                    video=file,
-                    thumbnail=FSInputFile(thumb),
-                    supports_streaming=True
-                )
+                # send video with thumbnail
+                try:
+                    await message.answer_video(
+                        video=file,
+                        thumbnail=FSInputFile(thumb) if os.path.exists(thumb) else None,
+                        supports_streaming=True
+                    )
+                except Exception:
+                    # fallback to sending as document if answer_video fails
+                    await message.answer_document(file)
 
                 if os.path.exists(thumb):
                     os.remove(thumb)
 
             elif media_type == "image":
 
-                await message.answer_photo(file)
+                try:
+                    await message.answer_photo(file)
+                except Exception:
+                    await message.answer_document(file)
+
+            elif media_type == "audio":
+
+                try:
+                    await message.answer_audio(file)
+                except Exception:
+                    await message.answer_document(file)
 
             else:
 
