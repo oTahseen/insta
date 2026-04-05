@@ -51,6 +51,10 @@ async def fetch_data(url: str):
             return await resp.json()
 
 async def download_file(url):
+    # Validate URL before attempting download
+    if not isinstance(url, str) or not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(f"Invalid URL: {url}")
+
     filename = f"/tmp/{uuid.uuid4().hex}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -85,8 +89,15 @@ def create_thumbnail(video_path):
     return thumb
 
 def parse_media(api_json, original_url: str):
+    """
+    Parse the API JSON and return a list of dicts: {"url": <url>, "type": <video|image|audio|document>}
+    Note: For TikTok the "download" field can be a numeric string (count). Only treat it as a URL
+    when it looks like one (starts with http).
+    """
     out = []
     data = api_json.get("data")
+
+    # If data is a list of media objects
     if isinstance(data, list):
         for m in data:
             murl = m.get("url")
@@ -94,36 +105,49 @@ def parse_media(api_json, original_url: str):
             if murl:
                 out.append({"url": murl, "type": mtype})
         return out
-    if isinstance(data, dict) and data.get("download"):
+
+    # If data is a dict, first check if there's a download URL that actually looks like a URL
+    if isinstance(data, dict):
         dl = data.get("download")
-        if dl:
+        if isinstance(dl, str) and dl.startswith("http"):
             out.append({"url": dl, "type": "video"})
-        return out
+            return out
+
+    # Process meta.media entries (covers TikTok and other structured responses)
     if isinstance(data, dict):
         meta = data.get("meta", {})
         media = meta.get("media", [])
         for m in media:
+            if not isinstance(m, dict):
+                continue
             mtype = m.get("type")
             if mtype == "video":
+                # Prefer original (org), then hd, then watermark (wm)
                 url = m.get("org") or m.get("hd") or m.get("wm")
-                if url:
+                if url and isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
                     out.append({"url": url, "type": "video"})
             elif mtype == "image":
                 images = m.get("images", [])
                 for img in images:
-                    if img:
+                    if img and isinstance(img, str) and (img.startswith("http://") or img.startswith("https://")):
                         out.append({"url": img, "type": "image"})
                 audio = m.get("audio")
-                if audio:
+                if audio and isinstance(audio, str) and (audio.startswith("http://") or audio.startswith("https://")):
                     out.append({"url": audio, "type": "audio"})
             else:
+                # Fallback: try common keys
                 for k in ("url", "org", "hd", "wm"):
-                    if m.get(k):
-                        out.append({"url": m.get(k), "type": mtype or "document"})
+                    v = m.get(k)
+                    if v and isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
+                        out.append({"url": v, "type": mtype or "document"})
                         break
         return out
+
+    # If top-level api_json has a url field
     if isinstance(api_json, dict) and api_json.get("url"):
-        out.append({"url": api_json.get("url"), "type": "document"})
+        top_url = api_json.get("url")
+        if isinstance(top_url, str) and (top_url.startswith("http://") or top_url.startswith("https://")):
+            out.append({"url": top_url, "type": "document"})
     return out
 
 @dp.message()
@@ -153,6 +177,8 @@ async def downloader(message: Message):
             if not murl:
                 continue
             try:
+                # helpful debug: show which URL we're attempting to download
+                print(f"Downloading {mtype} from {murl}")
                 file_path = await download_file(murl)
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
