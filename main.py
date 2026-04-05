@@ -15,6 +15,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
 TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
+YOUTUBE_API = "https://api.delirius.store/download/ytmp4?url="
+YOUTUBE_DEFAULT_FORMAT = "720"
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -26,20 +28,20 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
-        "👋 <b>Instagram / TikTok Downloader</b>\n\n"
-        "Send an Instagram or TikTok link and I will download the media."
+        "👋 <b>Instagram / TikTok / YouTube Downloader</b>\n\n"
+        "Send an Instagram, TikTok or YouTube link and I will download the media."
     )
 
-async def fetch_data(url: str):
+def fetch_data(url: str):
+    # choose API based on link
     if "tiktok" in url or "tiktokcdn" in url or "vm.tiktok" in url:
         api = f"{TIKTOK_API}{url}"
+    elif "youtube.com" in url or "youtu.be" in url or "youtube" in url:
+        # use default format for YouTube
+        api = f"{YOUTUBE_API}{url}&format={YOUTUBE_DEFAULT_FORMAT}"
     else:
         api = f"{INSTAGRAM_API}{url}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(api) as resp:
-            if resp.status != 200:
-                return {"status": False}
-            return await resp.json()
+    return api
 
 async def download_file(url):
     filename = f"/tmp/{uuid.uuid4().hex}"
@@ -78,6 +80,10 @@ def create_thumbnail(video_path):
 def parse_media(api_json, original_url: str):
     out = []
     data = api_json.get("data")
+    # Handle Delirius YouTube response where data contains a direct download URL
+    if isinstance(data, dict) and data.get("download"):
+        out.append({"url": data.get("download"), "type": "video"})
+        return out
     if isinstance(data, list):
         for m in data:
             murl = m.get("url")
@@ -116,10 +122,10 @@ def parse_media(api_json, original_url: str):
 async def downloader(message: Message):
     url = (message.text or "").strip()
     if not url:
-        await message.reply("❌ Please send a valid Instagram or TikTok link.")
+        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
         return
-    if ("instagram.com" not in url) and ("tiktok" not in url):
-        await message.reply("❌ Please send a valid Instagram or TikTok link.")
+    if ("instagram.com" not in url) and ("tiktok" not in url) and ("youtube" not in url) and ("youtu.be" not in url):
+        await message.reply("❌ Please send a valid Instagram, TikTok or YouTube link.")
         return
     status = await message.reply("⏳ Fetching media...")
     try:
