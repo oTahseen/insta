@@ -24,6 +24,7 @@ bot = Bot(
 
 dp = Dispatcher()
 
+
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await message.answer(
@@ -31,14 +32,20 @@ async def start_handler(message: Message):
         "Send an Instagram, TikTok or YouTube link and I will download the media."
     )
 
+
 async def fetch_data(url: str):
+    """
+    Query the delirius API for the given URL.
+    For YouTube: call the ytmp4 endpoint with query params (format=720).
+    For TikTok/Instagram: call the respective endpoints.
+    """
     u = (url or "").lower()
     is_tiktok = any(x in u for x in ("tiktok", "tiktokcdn", "vm.tiktok"))
     is_youtube = any(x in u for x in ("youtube.com", "youtu.be", "youtube"))
 
     async with aiohttp.ClientSession() as session:
         if is_youtube:
-            # request the ytmp4 endpoint using query params (format=720)
+            # Use params so the youtube url is properly passed and format set to 720
             async with session.get(YOUTUBE_API, params={"url": url, "format": "720"}) as resp:
                 if resp.status != 200:
                     return {"status": False}
@@ -52,17 +59,37 @@ async def fetch_data(url: str):
                 return {"status": False}
             return await resp.json()
 
-async def download_file(url):
+
+async def download_file(url: str):
+    """
+    Download a remote file to a temp path and return the filename.
+    Uses a total timeout and cleans up partial files on error.
+    Raises RuntimeError on failure with a message including the URL and the original error.
+    """
     filename = f"/tmp/{uuid.uuid4().hex}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise ValueError(f"Download failed (status={resp.status}) for {url}")
-            with open(filename, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1024 * 256):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
+    timeout = aiohttp.ClientTimeout(total=120)  # 120 seconds total
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; InstaDownloader/1.0; +https://github.com)"
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"Download failed (status={resp.status}) for {url}")
+                with open(filename, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024 * 256):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+    except Exception as exc:
+        # remove partial file if present, then re-raise with context
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except Exception:
+            pass
+        raise RuntimeError(f"download error for {url}: {exc}") from exc
+
     try:
         size = os.path.getsize(filename)
     except OSError:
@@ -73,7 +100,8 @@ async def download_file(url):
         raise ValueError("Downloaded file is empty")
     return filename
 
-def create_thumbnail(video_path):
+
+def create_thumbnail(video_path: str):
     thumb = f"{video_path}.jpg"
     command = [
         "ffmpeg",
@@ -86,7 +114,14 @@ def create_thumbnail(video_path):
     subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return thumb
 
+
 def parse_media(api_json, original_url: str):
+    """
+    Normalize the API response into a list of {'url': ..., 'type': ...}
+    Supports:
+     - YouTube ytmp4 (data.download -> video)
+     - existing Instagram/TikTok shapes used previously
+    """
     out = []
     data = api_json.get("data")
 
@@ -102,6 +137,7 @@ def parse_media(api_json, original_url: str):
             if murl:
                 out.append({"url": murl, "type": mtype})
         return out
+
     if isinstance(data, dict):
         meta = data.get("meta", {})
         media = meta.get("media", [])
@@ -125,9 +161,11 @@ def parse_media(api_json, original_url: str):
                         out.append({"url": m.get(k), "type": mtype or "document"})
                         break
         return out
+
     if isinstance(api_json, dict) and api_json.get("url"):
         out.append({"url": api_json.get("url"), "type": "document"})
     return out
+
 
 @dp.message()
 async def downloader(message: Message):
@@ -160,7 +198,8 @@ async def downloader(message: Message):
                 file_path = await download_file(murl)
                 downloaded_files.append((file_path, mtype))
             except Exception as e:
-                await message.reply(f"⚠️ Skipped a file (download failed): {e}")
+                # Provide URL + real error to aid debugging (and manual testing)
+                await message.reply(f"⚠️ Skipped a file (download failed) for {murl}: {e}")
         if not downloaded_files:
             await status.edit_text("❌ Nothing downloaded.")
             return
@@ -186,15 +225,20 @@ async def downloader(message: Message):
                     await message.answer_document(file)
             except Exception as e:
                 await message.reply(f"❌ Telegram send failed: {e}")
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
         await status.delete()
     except Exception as e:
         await message.reply(f"❌ Error: {e}")
 
+
 async def main():
     print("🚀 Bot started")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
