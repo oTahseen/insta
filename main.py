@@ -14,7 +14,7 @@ BOT_TOKEN = "8648830104:AAEc8EFi1lqoOCMLh5N4UxxbHoVtOsSEL84"
 
 INSTAGRAM_API = "https://api.delirius.store/download/instagram?url="
 TIKTOK_API = "https://api.delirius.store/download/tiktok?url="
-YOUTUBE_API = "https://api.delirius.store/download/ytmp4?url="
+YT_API = "https://api.delirius.store/download/ytmp4?url="
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -36,12 +36,13 @@ async def start_handler(message: Message):
 # FETCH DATA (chooses endpoint by URL)
 async def fetch_data(url: str):
 
-    # choose API by URL
+    # prefer tiktok detection first
     if "tiktok" in url or "tiktokcdn" in url or "vm.tiktok" in url:
         api = f"{TIKTOK_API}{url}"
+    # youtube detection
     elif "youtube.com" in url or "youtu.be" in url:
-        # default to 720 format; adjust if you want a different quality
-        api = f"{YOUTUBE_API}{url}&format=720"
+        # request mp4 with a reasonable default format (720)
+        api = f"{YT_API}{url}&format=720"
     else:
         api = f"{INSTAGRAM_API}{url}"
 
@@ -85,7 +86,7 @@ async def download_file(url):
 
 
 # CREATE VIDEO THUMBNAIL
- def create_thumbnail(video_path):
+def create_thumbnail(video_path):
 
     thumb = f"{video_path}.jpg"
 
@@ -111,8 +112,10 @@ def parse_media(api_json, original_url: str):
     """
     out = []
 
-    # Instagram-like response: data is a list of media objects
+    # top-level data key
     data = api_json.get("data")
+
+    # Instagram-like response: data is a list of media objects
     if isinstance(data, list):
         for m in data:
             murl = m.get("url")
@@ -123,9 +126,9 @@ def parse_media(api_json, original_url: str):
 
     # YouTube-like response: data is a dict with 'download' key
     if isinstance(data, dict) and data.get("download"):
-        dl = data.get("download")
-        if dl:
-            out.append({"url": dl, "type": "video"})
+        download_url = data.get("download")
+        if download_url:
+            out.append({"url": download_url, "type": "video"})
         return out
 
     # TikTok-like response: data is a dict with meta.media list
@@ -156,7 +159,7 @@ def parse_media(api_json, original_url: str):
                         break
         return out
 
-    # last ditch: if data contains url directly
+    # last ditch: if api_json itself contains 'url' or 'download'
     if isinstance(api_json, dict) and api_json.get("url"):
         out.append({"url": api_json.get("url"), "type": "document"})
 
